@@ -1,0 +1,19 @@
+# Python 3.11+ (проверено на macOS / Linux + CUDA / Colab)
+# Версии зафиксированы ради воспроизводимости решения.
+
+# данные и EDA
+numpy==2.4.6
+pandas==3.0.6
+pillow==12.3.0
+matplotlib==3.11.2
+tqdm==4.70.1
+
+# модель: обучение и инференс (cuda / mps / cpu выбираются автоматически в коде)
+torch==2.14.0
+torchvision==0.29.0
+
+# валидация и калибровка (Brier score, logloss)
+scikit-learn==1.9.1
+
+# запуск ноутбука в VS Code / Jupyter
+ipykernel==7.3.0
