@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch import nn
+from tqdm import tqdm
 
 from src.model import build_model
 
@@ -19,7 +20,7 @@ def sigmoid(z: np.ndarray) -> np.ndarray:
 
 
 def evaluate(logits: np.ndarray, y: np.ndarray, temperature: float = 1.0) -> dict:
-    """ Brier (главная метрика), Brier, logloss и accuracy по логитам.
+    """1 − Brier (главная метрика), Brier, logloss и accuracy по логитам.
     temperature делит логит перед сигмоидой (калибровка, раздел 6)."""
     z = logits / temperature
     p = sigmoid(z)
@@ -32,10 +33,11 @@ def evaluate(logits: np.ndarray, y: np.ndarray, temperature: float = 1.0) -> dic
 # ---------------------------------------------------------------- предсказания
 
 @torch.no_grad()
-def predict_logits(model: nn.Module, loader, device) -> np.ndarray:
+def predict_logits(model: nn.Module, loader, device, progress: bool = False) -> np.ndarray:
     """Логиты для всего loader'а в исходном порядке (loader без shuffle)."""
     model.eval()
-    out = [model(x.to(device, non_blocking=True)).float().squeeze(1).cpu() for x, _ in loader]
+    batches = tqdm(loader, desc="валидация", leave=False) if progress else loader
+    out = [model(x.to(device, non_blocking=True)).float().squeeze(1).cpu() for x, _ in batches]
     return torch.cat(out).numpy()
 
 
@@ -79,6 +81,7 @@ def time_steps(model: nn.Module, loader, device, n_steps: int = 30, warmup: int 
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
     loss_fn = nn.BCEWithLogitsLoss()
     amp_ctx, scaler = _amp(device)
+
     assert len(loader) > warmup + 1, "в loader слишком мало батчей для замера"
 
     def run(train_step: bool) -> float:
@@ -123,7 +126,8 @@ def fit(model: nn.Module, train_loader, val_loader, val_labels: np.ndarray, devi
         t0 = time.perf_counter()
         model.train()
         loss_sum, n = 0.0, 0
-        for x, y in train_loader:
+        bar = tqdm(train_loader, desc=f"эпоха {epoch}/{epochs}", leave=False, mininterval=1)
+        for x, y in bar:
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
             with amp_ctx:
                 loss = loss_fn(model(x).squeeze(1), y)
@@ -134,8 +138,9 @@ def fit(model: nn.Module, train_loader, val_loader, val_labels: np.ndarray, devi
             sched.step()
             loss_sum += loss.item() * len(x)
             n += len(x)
+            bar.set_postfix(loss=f"{loss_sum / n:.4f}", img_s=f"{n / (time.perf_counter() - t0):.0f}", refresh=False)
 
-        val = evaluate(predict_logits(model, val_loader, device), val_labels)
+        val = evaluate(predict_logits(model, val_loader, device, progress=True), val_labels)
         row = {"epoch": epoch, "lr": opt.param_groups[0]["lr"], "train_loss": loss_sum / n,
                "val_loss": val["logloss"], "val_brier": val["brier"], "val_score": val["score"],
                "val_acc": val["acc"], "minutes": (time.perf_counter() - t0) / 60}

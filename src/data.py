@@ -149,15 +149,18 @@ class CropDataset(Dataset):
     """Кропы RusTitW. Метку y создаём сами: y=1 — повернули на 180°, y=0 — оставили.
 
     train=True:  случайный поворот (монетка заново на каждой эпохе) + аугментации.
+    train=True, paired=True: пара из одного и того же кропа в двух ориентациях (y=0 и y=1)
+                 с одинаковыми аугментациями — отличается только поворот (как в RotNet).
     train=False: валидация. Кроп строго по боксу (без полей, как у детектора),
                  без аугментаций, поворот фиксирован seed'ом -> набор одинаковый при каждом запуске.
     """
 
-    def __init__(self, df, root, train: bool, seed: int = 42):
+    def __init__(self, df, root, train: bool, seed: int = 42, paired: bool = False):
         self.root = Path(root)
         self.paths = df["path"].tolist()
         self.boxes = df[["bx0", "by0", "bx1", "by1"]].to_numpy(np.float32)
         self.train = train
+        self.paired = train and paired
         self.labels = None if train else np.random.default_rng(seed).integers(0, 2, len(df))
 
     def __len__(self):
@@ -170,6 +173,13 @@ class CropDataset(Dataset):
             # каждому воркеру свой seed от seed'а загрузчика -> аугментации воспроизводимы
             rng = np.random.default_rng(int(torch.randint(0, 2**31 - 1, (1,))))
             img = augment_upright(img, self.boxes[i], rng)
+            if self.paired:
+                # один seed деградаций для обеих копий: у пары отличается только ориентация
+                deg_seed = int(rng.integers(0, 2**31 - 1))
+                up = degrade(img, np.random.default_rng(deg_seed))
+                rot = degrade(img.transpose(Image.Transpose.ROTATE_180), np.random.default_rng(deg_seed))
+                x = torch.stack([to_tensor(resize_pad(up)), to_tensor(resize_pad(rot))])
+                return x, torch.tensor([0.0, 1.0])
             y = int(rng.random() < 0.5)
             if y:
                 img = img.transpose(Image.Transpose.ROTATE_180)
@@ -197,9 +207,17 @@ class TestDataset(Dataset):
         return preprocess(Image.open(self.paths[i])), i
 
 
+def collate_pairs(batch):
+    """Пары (2, 3, H, W) склеиваем в обычный батч: B пар -> 2B картинок, метки [0, 1, 0, 1, ...]."""
+    xs, ys = zip(*batch)
+    return torch.cat(xs), torch.cat(ys)
+
+
 def make_loader(ds, shuffle: bool, batch_size: int = 256, num_workers: int = 4, seed: int = 42):
     """DataLoader с фиксированным генератором: он задаёт порядок батчей и seed'ы воркеров,
-    поэтому аугментации воспроизводятся от запуска к запуску."""
+    поэтому аугментации воспроизводятся от запуска к запуску.
+    Для парного датасета batch_size — число пар, в батче будет вдвое больше картинок."""
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers,
                       generator=torch.Generator().manual_seed(seed),
+                      collate_fn=collate_pairs if getattr(ds, "paired", False) else None,
                       pin_memory=torch.cuda.is_available(), persistent_workers=num_workers > 0)
